@@ -364,7 +364,10 @@ function registerGameSocket(io) {
         socket.user._id.toString(), 
         socket.user.name
       );
-      socket.emit('voice_token', { token: voiceToken });
+      socket.emit('voice_token', { 
+        token: voiceToken,
+        url: process.env.LIVEKIT_HOST || 'http://localhost:7880'
+      });
     });
 
     socket.on('disconnect', () => {

@@ -6,20 +6,34 @@ const jwt = require('jsonwebtoken');
 let firebaseInitialized = false;
 
 const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+let serviceAccount;
 
-if (serviceAccountPath && fs.existsSync(path.resolve(serviceAccountPath))) {
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
-    const serviceAccount = require(path.resolve(serviceAccountPath));
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  } catch (error) {
+    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON env variable:', error.message);
+  }
+} else if (serviceAccountPath && fs.existsSync(path.resolve(serviceAccountPath))) {
+  try {
+    serviceAccount = require(path.resolve(serviceAccountPath));
+  } catch (error) {
+    console.error('Failed to load Firebase service account file:', error.message);
+  }
+}
+
+if (serviceAccount) {
+  try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully.');
     firebaseInitialized = true;
   } catch (error) {
-    console.error('Failed to initialize Firebase Admin:', error.message);
+    console.error('Failed to initialize Firebase Admin with credentials:', error.message);
   }
 } else {
-  console.warn('WARNING: Firebase Service Account path not found or invalid. Authentication fallback mock mode will be enabled for development.');
+  console.warn('WARNING: Firebase Service Account credentials not configured. Authentication fallback mock mode will be enabled for development.');
 }
 
 /**
