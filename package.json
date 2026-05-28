@@ -1,0 +1,23 @@
+{
+  "name": "ludo-backend",
+  "version": "1.0.0",
+  "description": "Premium Multiplayer Ludo Platform Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.1",
+    "jsonwebtoken": "^9.0.2",
+    "livekit-server-sdk": "^2.2.0",
+    "mongoose": "^8.4.1",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.2"
+  }
+}
