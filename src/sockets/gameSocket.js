@@ -6,6 +6,7 @@ const { initializeGame, handleDiceRoll, handlePawnMove } = require('../services/
 const { selectBotMove } = require('../services/botService');
 const { generateVoiceToken } = require('../services/livekitService');
 const jwt = require('jsonwebtoken');
+const { incrementMissionProgressHelper } = require('../controllers/rewardController');
 
 // Memory store for active games in progress
 const activeGames = new Map();
@@ -474,7 +475,7 @@ async function finalizeGameEnd(io, roomCode, gameState) {
       room.winner = winnerId;
       await room.save();
 
-      // Award coins and XP
+      // Award coins and XP, update stats and missions
       const winnerUser = await User.findById(winnerId);
       if (winnerUser) {
         const winnings = room.entryFee * room.maxPlayers;
@@ -483,6 +484,14 @@ async function finalizeGameEnd(io, roomCode, gameState) {
         winnerUser.totalWins += 1;
         winnerUser.totalGames += 1;
         
+        // Streak updates
+        winnerUser.currentWinStreak = (winnerUser.currentWinStreak || 0) + 1;
+        winnerUser.highestWinStreak = Math.max(winnerUser.highestWinStreak || 0, winnerUser.currentWinStreak);
+        
+        // Daily mission increments
+        await incrementMissionProgressHelper(winnerUser, 'play_matches', 1);
+        await incrementMissionProgressHelper(winnerUser, 'win_matches', 1);
+
         // Mark badge milestones
         if (winnerUser.totalWins === 1) winnerUser.achievements.push('First Victory');
         if (winnerUser.totalWins === 10) winnerUser.achievements.push('Ludo Master');
@@ -510,12 +519,21 @@ async function finalizeGameEnd(io, roomCode, gameState) {
 
       await match.save();
 
-      // Update loser games counts
+      // Update loser games counts, statistics, and daily missions
       for (const p of room.players) {
         if (p.user && p.user.toString() !== winnerId) {
-          await User.findByIdAndUpdate(p.user, {
-            $inc: { totalGames: 1, xp: 50 } // Give small XP consolation prize
-          });
+          const loserUser = await User.findById(p.user);
+          if (loserUser) {
+            loserUser.totalGames += 1;
+            loserUser.losses = (loserUser.losses || 0) + 1;
+            loserUser.currentWinStreak = 0; // Streak resets on loss
+            loserUser.xp += 50; // Consolation XP
+
+            // Daily mission play increment
+            await incrementMissionProgressHelper(loserUser, 'play_matches', 1);
+
+            await loserUser.save();
+          }
         }
       }
     }
@@ -533,5 +551,6 @@ async function finalizeGameEnd(io, roomCode, gameState) {
 }
 
 module.exports = {
-  registerGameSocket
+  registerGameSocket,
+  activeGames
 };

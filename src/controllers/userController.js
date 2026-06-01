@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const Match = require('../models/Match');
 
 /**
  * @desc    Update user profile (name, avatar)
@@ -170,10 +171,31 @@ const removeFriend = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Get current user's match history
+ * @route   GET /api/users/match-history
+ * @access  Private
+ */
+const getMatchHistory = async (req, res) => {
+  try {
+    const matches = await Match.find({
+      'players.user': req.user._id
+    }).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      matches
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   updateProfile,
   searchUsers,
   sendFriendRequest,
   acceptFriendRequest,
   removeFriend,
+  getMatchHistory,
 };

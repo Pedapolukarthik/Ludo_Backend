@@ -107,6 +107,30 @@ const getMe = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
+
+    const today = new Date().toDateString();
+    if (!user.dailyMissions) {
+      user.dailyMissions = {
+        winMatchesCount: 0,
+        playMatchesCount: 0,
+        spunWheelCount: 0,
+        winMatchesClaimed: false,
+        playMatchesClaimed: false,
+        spunWheelClaimed: false,
+        lastResetDate: today
+      };
+      await user.save();
+    } else if (user.dailyMissions.lastResetDate !== today) {
+      user.dailyMissions.winMatchesCount = 0;
+      user.dailyMissions.playMatchesCount = 0;
+      user.dailyMissions.spunWheelCount = 0;
+      user.dailyMissions.winMatchesClaimed = false;
+      user.dailyMissions.playMatchesClaimed = false;
+      user.dailyMissions.spunWheelClaimed = false;
+      user.dailyMissions.lastResetDate = today;
+      await user.save();
+    }
+
     res.status(200).json({ success: true, user });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

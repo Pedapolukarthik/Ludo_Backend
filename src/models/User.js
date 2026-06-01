@@ -42,6 +42,27 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  losses: {
+    type: Number,
+    default: 0,
+  },
+  currentWinStreak: {
+    type: Number,
+    default: 0,
+  },
+  highestWinStreak: {
+    type: Number,
+    default: 0,
+  },
+  dailyMissions: {
+    winMatchesCount: { type: Number, default: 0 },
+    playMatchesCount: { type: Number, default: 0 },
+    spunWheelCount: { type: Number, default: 0 },
+    winMatchesClaimed: { type: Boolean, default: false },
+    playMatchesClaimed: { type: Boolean, default: false },
+    spunWheelClaimed: { type: Boolean, default: false },
+    lastResetDate: { type: String, default: "" }
+  },
   loginStreak: {
     type: Number,
     default: 1,

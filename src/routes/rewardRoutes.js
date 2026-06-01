@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { claimDailyReward, claimSpinWheel } = require('../controllers/rewardController');
+const { claimDailyReward, claimSpinWheel, getDailyMissions } = require('../controllers/rewardController');
 const { protect } = require('../middlewares/authMiddleware');
 
 router.post('/daily', protect, claimDailyReward);
 router.post('/spin', protect, claimSpinWheel);
+router.get('/missions', protect, getDailyMissions);
 
 module.exports = router;

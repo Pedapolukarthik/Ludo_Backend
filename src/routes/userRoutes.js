@@ -5,12 +5,14 @@ const {
   searchUsers,
   sendFriendRequest,
   acceptFriendRequest,
-  removeFriend
+  removeFriend,
+  getMatchHistory
 } = require('../controllers/userController');
 const { protect } = require('../middlewares/authMiddleware');
 
 router.put('/profile', protect, updateProfile);
 router.get('/search', protect, searchUsers);
+router.get('/match-history', protect, getMatchHistory);
 router.post('/friends/request/:id', protect, sendFriendRequest);
 router.post('/friends/accept/:id', protect, acceptFriendRequest);
 router.delete('/friends/:id', protect, removeFriend);

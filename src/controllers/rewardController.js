@@ -108,6 +108,10 @@ const claimSpinWheel = async (req, res) => {
     }
 
     user.achievements.push(spinKey);
+    
+    // Increment daily mission spin progress
+    await incrementMissionProgressHelper(user, 'spin_wheel', 1);
+    
     await user.save();
 
     res.status(200).json({
@@ -126,7 +130,144 @@ const claimSpinWheel = async (req, res) => {
   }
 };
 
+const incrementMissionProgressHelper = async (user, missionType, incrementAmount = 1) => {
+  const today = new Date().toDateString();
+  if (!user.dailyMissions) {
+    user.dailyMissions = {
+      winMatchesCount: 0,
+      playMatchesCount: 0,
+      spunWheelCount: 0,
+      winMatchesClaimed: false,
+      playMatchesClaimed: false,
+      spunWheelClaimed: false,
+      lastResetDate: today
+    };
+  } else if (user.dailyMissions.lastResetDate !== today) {
+    user.dailyMissions.winMatchesCount = 0;
+    user.dailyMissions.playMatchesCount = 0;
+    user.dailyMissions.spunWheelCount = 0;
+    user.dailyMissions.winMatchesClaimed = false;
+    user.dailyMissions.playMatchesClaimed = false;
+    user.dailyMissions.spunWheelClaimed = false;
+    user.dailyMissions.lastResetDate = today;
+  }
+
+  let coinsReward = 0;
+  let xpReward = 0;
+
+  if (missionType === 'win_matches') {
+    user.dailyMissions.winMatchesCount += incrementAmount;
+    if (user.dailyMissions.winMatchesCount >= 2 && !user.dailyMissions.winMatchesClaimed) {
+      user.dailyMissions.winMatchesClaimed = true;
+      coinsReward = 350;
+      xpReward = 150;
+    }
+  } else if (missionType === 'play_matches') {
+    user.dailyMissions.playMatchesCount += incrementAmount;
+    if (user.dailyMissions.playMatchesCount >= 3 && !user.dailyMissions.playMatchesClaimed) {
+      user.dailyMissions.playMatchesClaimed = true;
+      coinsReward = 250;
+      xpReward = 120;
+    }
+  } else if (missionType === 'spin_wheel') {
+    user.dailyMissions.spunWheelCount += incrementAmount;
+    if (user.dailyMissions.spunWheelCount >= 1 && !user.dailyMissions.spunWheelClaimed) {
+      user.dailyMissions.spunWheelClaimed = true;
+      coinsReward = 150;
+      xpReward = 80;
+    }
+  }
+
+  if (coinsReward > 0 || xpReward > 0) {
+    user.coins += coinsReward;
+    user.xp += xpReward;
+    
+    const newLevel = Math.floor(user.xp / 1000) + 1;
+    if (newLevel > user.level) {
+      user.level = newLevel;
+      if (newLevel >= 25) user.rank = 'Legend';
+      else if (newLevel >= 20) user.rank = 'Diamond';
+      else if (newLevel >= 15) user.rank = 'Platinum';
+      else if (newLevel >= 10) user.rank = 'Gold';
+      else if (newLevel >= 5) user.rank = 'Silver';
+    }
+  }
+};
+
+const getDailyMissions = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const today = new Date().toDateString();
+    
+    if (!user.dailyMissions) {
+      user.dailyMissions = {
+        winMatchesCount: 0,
+        playMatchesCount: 0,
+        spunWheelCount: 0,
+        winMatchesClaimed: false,
+        playMatchesClaimed: false,
+        spunWheelClaimed: false,
+        lastResetDate: today
+      };
+      await user.save();
+    } else if (user.dailyMissions.lastResetDate !== today) {
+      user.dailyMissions.winMatchesCount = 0;
+      user.dailyMissions.playMatchesCount = 0;
+      user.dailyMissions.spunWheelCount = 0;
+      user.dailyMissions.winMatchesClaimed = false;
+      user.dailyMissions.playMatchesClaimed = false;
+      user.dailyMissions.spunWheelClaimed = false;
+      user.dailyMissions.lastResetDate = today;
+      await user.save();
+    }
+
+    const dm = user.dailyMissions;
+    const missions = [
+      {
+        id: 'win_matches',
+        title: 'Win 2 Matches',
+        description: 'Win 2 classic or quick matches online',
+        progress: dm.winMatchesCount,
+        goal: 2,
+        coins: 350,
+        xp: 150,
+        completed: dm.winMatchesClaimed
+      },
+      {
+        id: 'play_matches',
+        title: 'Play 3 Games',
+        description: 'Play 3 games to completion (vs online players or AI)',
+        progress: dm.playMatchesCount,
+        goal: 3,
+        coins: 250,
+        xp: 120,
+        completed: dm.playMatchesClaimed
+      },
+      {
+        id: 'spin_wheel',
+        title: 'Spin Reward Wheel',
+        description: 'Spin the rewards wheel once',
+        progress: dm.spunWheelCount,
+        goal: 1,
+        coins: 150,
+        xp: 80,
+        completed: dm.spunWheelClaimed
+      }
+    ];
+
+    res.status(200).json({ success: true, missions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   claimDailyReward,
   claimSpinWheel,
+  getDailyMissions,
+  incrementMissionProgressHelper,
 };
