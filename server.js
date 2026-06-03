@@ -7,6 +7,7 @@ const { Server } = require('socket.io');
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
 const { initSockets } = require('./src/sockets');
+const { validateLiveKitCredentials } = require('./src/config/livekit');
 
 const PORT = process.env.PORT || 5000;
 
@@ -27,7 +28,12 @@ const io = new Server(server, {
 // Configure Socket events
 initSockets(io);
 
+// Validate LiveKit credentials at startup (non-blocking)
+validateLiveKitCredentials().catch(() => {});
+
 // Start listening
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
 });
+
+// Force nodemon reload to pick up correct LIVEKIT_HOST, SDK Token, and new credentials from .env

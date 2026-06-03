@@ -5,6 +5,7 @@ const Chat = require('../models/Chat');
 const { initializeGame, handleDiceRoll, handlePawnMove } = require('../services/gameEngine');
 const { selectBotMove } = require('../services/botService');
 const { generateVoiceToken } = require('../services/livekitService');
+const livekitConfig = require('../config/livekit');
 const jwt = require('jsonwebtoken');
 const { incrementMissionProgressHelper } = require('../controllers/rewardController');
 
@@ -359,16 +360,43 @@ function registerGameSocket(io) {
       });
     });
 
-    socket.on('request_voice_token', ({ roomCode }) => {
-      const voiceToken = generateVoiceToken(
-        roomCode, 
-        socket.user._id.toString(), 
-        socket.user.name
-      );
-      socket.emit('voice_token', { 
-        token: voiceToken,
-        url: process.env.LIVEKIT_HOST || 'http://localhost:7880'
-      });
+    socket.on('request_voice_token', async ({ roomCode }) => {
+      console.log(`[Voice Socket] User ${socket.user?.name || 'Unknown'} (${socket.user?._id}) requesting voice token for room ${roomCode}`);
+      try {
+        if (!livekitConfig.isConfigured) {
+          throw new Error('LiveKit is not configured on the server (missing API key/secret)');
+        }
+
+        const normalizedRoom = (roomCode || '').toString().trim().toUpperCase();
+        if (!normalizedRoom) {
+          throw new Error('Room code is required');
+        }
+
+        if (livekitConfig.credentialsValid === false) {
+          throw new Error(
+            'LiveKit credentials invalid on server — fix LIVEKIT_API_KEY and LIVEKIT_API_SECRET'
+          );
+        }
+
+        const { token, roomName, expiresIn } = await generateVoiceToken(
+          normalizedRoom,
+          socket.user._id.toString(),
+          socket.user.name
+        );
+
+        console.log(
+          `[Voice Socket] Token issued for ${roomName} (ttl=${expiresIn}), host: ${livekitConfig.wsUrl}`
+        );
+        socket.emit('voice_token', {
+          token,
+          url: livekitConfig.wsUrl,
+          roomName,
+          expiresIn,
+        });
+      } catch (err) {
+        console.error(`[Voice Socket] Voice token generation failed for room ${roomCode}: ${err.message}`);
+        socket.emit('voice_token_error', { message: err.message });
+      }
     });
 
     socket.on('disconnect', () => {
