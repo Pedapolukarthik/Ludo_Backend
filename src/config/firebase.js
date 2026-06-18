@@ -89,7 +89,74 @@ async function verifyFirebaseToken(idToken) {
   }
 }
 
+/**
+ * Sends a push notification to a single device token.
+ * @param {string} token Device token
+ * @param {string} title Notification title
+ * @param {string} body Notification body
+ * @param {Object} [data] Optional key-value data payload
+ */
+async function sendPushNotification(token, title, body, data = {}) {
+  if (!token) return;
+  // Convert all keys in data to strings for Firebase compatibility
+  const stringData = {};
+  for (const [key, value] of Object.entries(data)) {
+    stringData[key] = String(value);
+  }
+  if (firebaseInitialized) {
+    try {
+      const message = {
+        token: token,
+        notification: { title, body },
+        data: stringData
+      };
+      const response = await admin.messaging().send(message);
+      console.log('Successfully sent push notification:', response);
+      return response;
+    } catch (error) {
+      console.error('Error sending push notification:', error.message);
+    }
+  } else {
+    console.log(`[FCM Mock Push] Token: ${token} | Title: "${title}" | Body: "${body}" | Data:`, stringData);
+  }
+}
+
+/**
+ * Sends a push notification to multiple device tokens.
+ * @param {Array<string>} tokens Array of device tokens
+ * @param {string} title Notification title
+ * @param {string} body Notification body
+ * @param {Object} [data] Optional key-value data payload
+ */
+async function sendMulticastNotification(tokens, title, body, data = {}) {
+  const validTokens = (tokens || []).filter(t => typeof t === 'string' && t.trim().length > 0);
+  if (validTokens.length === 0) return;
+  // Convert all keys in data to strings for Firebase compatibility
+  const stringData = {};
+  for (const [key, value] of Object.entries(data)) {
+    stringData[key] = String(value);
+  }
+  if (firebaseInitialized) {
+    try {
+      const message = {
+        tokens: validTokens,
+        notification: { title, body },
+        data: stringData
+      };
+      const response = await admin.messaging().sendEachForMulticast(message);
+      console.log(`Successfully sent multicast to ${validTokens.length} devices. Success: ${response.successCount}, Failure: ${response.failureCount}`);
+      return response;
+    } catch (error) {
+      console.error('Error sending multicast notification:', error.message);
+    }
+  } else {
+    console.log(`[FCM Mock Multicast] ${validTokens.length} Devices | Title: "${title}" | Body: "${body}" | Data:`, stringData);
+  }
+}
+
 module.exports = {
   verifyFirebaseToken,
-  isFirebaseAvailable: () => firebaseInitialized
+  isFirebaseAvailable: () => firebaseInitialized,
+  sendPushNotification,
+  sendMulticastNotification
 };

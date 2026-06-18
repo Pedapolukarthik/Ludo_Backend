@@ -1,116 +1,176 @@
-const mongoose = require('mongoose');
+const { DataTypes, Model } = require('sequelize');
+const connectDB = require('../config/db');
+const sequelize = connectDB.sequelize;
 
-const UserSchema = new mongoose.Schema({
+function parseJsonArray(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {}
+  }
+  return [];
+}
+
+class User extends Model {
+  get _id() {
+    return String(this.id);
+  }
+  toJSON() {
+    const values = Object.assign({}, this.get());
+    values._id = String(values.id);
+    values.id = String(values.id);
+    values.friends = parseJsonArray(values.friends).map(f => String(f));
+    values.friendRequests = parseJsonArray(values.friendRequests).map(r => String(r));
+    return values;
+  }
+}
+
+User.init({
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true,
+  },
   name: {
-    type: String,
-    required: true,
-    trim: true,
+    type: DataTypes.STRING,
+    allowNull: false,
   },
   email: {
-    type: String,
-    required: true,
+    type: DataTypes.STRING,
+    allowNull: false,
     unique: true,
-    lowercase: true,
-    trim: true,
   },
   avatar: {
-    type: String,
-    default: 'https://api.dicebear.com/7.x/pixel-art/svg',
+    type: DataTypes.STRING,
+    defaultValue: 'https://api.dicebear.com/7.x/pixel-art/svg',
   },
   coins: {
-    type: Number,
-    default: 1000,
+    type: DataTypes.INTEGER,
+    defaultValue: 1000,
   },
   xp: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   level: {
-    type: Number,
-    default: 1,
+    type: DataTypes.INTEGER,
+    defaultValue: 1,
   },
   rank: {
-    type: String,
-    enum: ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Legend'],
-    default: 'Bronze',
+    type: DataTypes.ENUM('Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Legend'),
+    defaultValue: 'Bronze',
   },
   totalWins: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   totalGames: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   losses: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   currentWinStreak: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   highestWinStreak: {
-    type: Number,
-    default: 0,
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
   },
   dailyMissions: {
-    winMatchesCount: { type: Number, default: 0 },
-    playMatchesCount: { type: Number, default: 0 },
-    spunWheelCount: { type: Number, default: 0 },
-    winMatchesClaimed: { type: Boolean, default: false },
-    playMatchesClaimed: { type: Boolean, default: false },
-    spunWheelClaimed: { type: Boolean, default: false },
-    lastResetDate: { type: String, default: "" }
+    type: DataTypes.JSON,
+    defaultValue: () => ({
+      winMatchesCount: 0,
+      playMatchesCount: 0,
+      spunWheelCount: 0,
+      winMatchesClaimed: false,
+      playMatchesClaimed: false,
+      spunWheelClaimed: false,
+      lastResetDate: new Date().toDateString()
+    }),
+    get() {
+      const val = this.getDataValue('dailyMissions');
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch (e) {}
+      }
+      return val || {};
+    }
   },
   loginStreak: {
-    type: Number,
-    default: 1,
+    type: DataTypes.INTEGER,
+    defaultValue: 1,
   },
   lastLogin: {
-    type: Date,
-    default: Date.now,
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW,
   },
   firebaseToken: {
-    type: String,
-    default: null,
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null,
   },
   banned: {
-    type: Boolean,
-    default: false,
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
   },
   referralCode: {
-    type: String,
+    type: DataTypes.STRING,
     unique: true,
-    sparse: true,
+    allowNull: true,
   },
   referredBy: {
-    type: String,
-    default: null,
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null,
   },
-  achievements: [{
-    type: String,
-  }],
-  friends: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-  }],
-  friendRequests: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-  }],
-  createdAt: {
-    type: Date,
-    default: Date.now,
+  achievements: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+    get() {
+      return parseJsonArray(this.getDataValue('achievements'));
+    }
+  },
+  friends: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+    get() {
+      return parseJsonArray(this.getDataValue('friends'));
+    }
+  },
+  friendRequests: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+    get() {
+      return parseJsonArray(this.getDataValue('friendRequests'));
+    }
+  },
+  allowSpectating: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true,
+  }
+}, {
+  sequelize,
+  modelName: 'User',
+  indexes: [
+    {
+      fields: ['coins']
+    },
+    {
+      fields: ['xp']
+    }
+  ],
+  hooks: {
+    beforeCreate: (user) => {
+      if (!user.referralCode) {
+        user.referralCode = 'LUDO' + Math.random().toString(36).substring(2, 8).toUpperCase();
+      }
+    }
   }
 });
 
-// Auto-generate referral code on creation
-UserSchema.pre('save', function (next) {
-  if (!this.referralCode) {
-    this.referralCode = 'LUDO' + Math.random().toString(36).substring(2, 8).toUpperCase();
-  }
-  next();
-});
-
-module.exports = mongoose.model('User', UserSchema);
+module.exports = User;

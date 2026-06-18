@@ -41,6 +41,11 @@ function initializeGame(room) {
     pawns[color] = [0, 0, 0, 0]; // 4 pawns, all at step 0 (yard)
   });
 
+  const scores = {};
+  playerColors.forEach(color => {
+    scores[color] = 0;
+  });
+
   return {
     roomCode: room.code,
     players: room.players.map(p => ({
@@ -59,6 +64,9 @@ function initializeGame(room) {
     consecutiveSixes: 0,
     pawns,
     winner: null,
+    gameMode: room.gameMode || 'standard',
+    rollCount: 0,
+    scores,
     history: []
   };
 }
@@ -125,12 +133,15 @@ function handleDiceRoll(gameState, color, customRoll = null) {
   gameState.diceValue = roll;
   gameState.rollState = 'rolled';
 
+  const player = gameState.players.find(p => p.color === color);
+  const playerName = player ? player.name : color;
+
   if (roll === 6) {
     gameState.consecutiveSixes += 1;
     if (gameState.consecutiveSixes === 3) {
       // 3 consecutive sixes forfeits turn
       gameState.history.push({
-        text: `${color} rolled three 6s in a row. Turn forfeited!`
+        text: `${playerName} rolled three 6s in a row. Turn forfeited!`
       });
       passTurn(gameState);
       return { roll, forfeit: true, possibleMoves: [] };
@@ -141,15 +152,16 @@ function handleDiceRoll(gameState, color, customRoll = null) {
 
   const possibleMoves = getPossibleMoves(gameState, color, roll);
   
-  // If no moves are possible, turn passes automatically (unless rolled 6, wait, if you roll 6 but have no moves?
-  // Yes, if you roll 6 but have no moves, you would pass, but normally a 6 unlocks or moves.
-  // If you can't move, pass turn.
   if (possibleMoves.length === 0) {
     gameState.history.push({
-      text: `${color} rolled a ${roll} but has no moves.`
+      text: `${playerName} rolled a ${roll} but has no moves.`
     });
     // Set timeout to pass turn after a small delay on clients
     setTimeoutPass(gameState);
+  } else {
+    gameState.history.push({
+      text: `${playerName} rolled a ${roll}`
+    });
   }
 
   return { roll, forfeit: false, possibleMoves };
@@ -182,12 +194,20 @@ function handlePawnMove(gameState, color, pawnId) {
   const prevStep = gameState.pawns[color][pawnId];
   const newStep = selectedMove.to;
   
+  // Count goal before move
+  const goalCountBefore = gameState.pawns[color].filter(step => step === 57).length;
+
   // Perform move
   gameState.pawns[color][pawnId] = newStep;
   gameState.rollState = 'idle';
 
   let hasKilled = false;
   let hasReachedGoal = (newStep === 57);
+
+  // Speed Ludo roll count
+  if (gameState.gameMode === 'speed_ludo') {
+    gameState.rollCount = (gameState.rollCount || 0) + 1;
+  }
 
   // Check if we land on general track and kill an opponent
   if (newStep >= 1 && newStep <= 51) {
@@ -207,8 +227,14 @@ function handlePawnMove(gameState, color, pawnId) {
             // Kill opponent pawn! Send back to yard (step 0)
             gameState.pawns[oppColor][i] = 0;
             hasKilled = true;
+            
+            const player = gameState.players.find(p => p.color === color);
+            const playerName = player ? player.name : color;
+            const oppPlayer = gameState.players.find(p => p.color === oppColor);
+            const oppPlayerName = oppPlayer ? oppPlayer.name : oppColor;
+
             gameState.history.push({
-              text: `${color} killed ${oppColor}'s pawn!`
+              text: `${playerName} captured ${oppPlayerName}'s pawn!`
             });
           }
         }
@@ -216,12 +242,108 @@ function handlePawnMove(gameState, color, pawnId) {
     }
   }
 
+  // Check if player reached 3 points (exactly 3 pawns in goal now, but was 2 before)
+  const goalCountAfter = gameState.pawns[color].filter(step => step === 57).length;
+  if (goalCountBefore === 2 && goalCountAfter === 3) {
+    const remainingPawnId = gameState.pawns[color].findIndex(step => step !== 57);
+    if (remainingPawnId !== -1) {
+      const currentStep = gameState.pawns[color][remainingPawnId];
+      const bonusStep = Math.min(57, currentStep + 4);
+      gameState.pawns[color][remainingPawnId] = bonusStep;
+      
+      const player = gameState.players.find(p => p.color === color);
+      const playerName = player ? player.name : color;
+
+      gameState.history.push({
+        text: `${playerName} reached 3 points! Pawn ${remainingPawnId + 1} automatically moved 4 steps.`
+      });
+
+      // Check if bonus move lands on general track and kills an opponent
+      if (bonusStep >= 1 && bonusStep <= 51) {
+        const landingTrackIndex = getGeneralTrackIndex(color, bonusStep);
+        if (!SAFE_ZONES.includes(landingTrackIndex)) {
+          Object.keys(gameState.pawns).forEach(oppColor => {
+            if (oppColor === color) return;
+            for (let i = 0; i < 4; i++) {
+              const oppStep = gameState.pawns[oppColor][i];
+              const oppTrackIndex = getGeneralTrackIndex(oppColor, oppStep);
+              if (oppTrackIndex === landingTrackIndex) {
+                gameState.pawns[oppColor][i] = 0;
+                hasKilled = true;
+
+                const oppPlayer = gameState.players.find(p => p.color === oppColor);
+                const oppPlayerName = oppPlayer ? oppPlayer.name : oppColor;
+
+                gameState.history.push({
+                  text: `${playerName} captured ${oppPlayerName}'s pawn!`
+                });
+              }
+            }
+          });
+        }
+      }
+    }
+  }
+
+  // Speed Ludo score updates
+  if (gameState.gameMode === 'speed_ludo') {
+    const stepsMoved = newStep - prevStep;
+    gameState.scores[color] = (gameState.scores[color] || 0) + stepsMoved;
+
+    if (hasReachedGoal) {
+      gameState.scores[color] += 50;
+    }
+
+    if (hasKilled) {
+      gameState.scores[color] += 30;
+    }
+
+    const landingTrackIndex = getGeneralTrackIndex(color, newStep);
+    if (landingTrackIndex && SAFE_ZONES.includes(landingTrackIndex) && prevStep < newStep) {
+      gameState.scores[color] += 10;
+    }
+
+    // Trigger end of game if we reach the max rolls limit (30 rolls)
+    if (gameState.rollCount >= 30) {
+      gameState.status = 'completed';
+      
+      let highestScore = -1;
+      let winnerColor = color;
+      Object.keys(gameState.scores).forEach(c => {
+        if (gameState.scores[c] > highestScore) {
+          highestScore = gameState.scores[c];
+          winnerColor = c;
+        }
+      });
+
+      gameState.winner = winnerColor;
+      
+      const winnerPlayer = gameState.players.find(p => p.color === winnerColor);
+      const winnerName = winnerPlayer ? winnerPlayer.name : winnerColor;
+      gameState.history.push({
+        text: `Speed Ludo finished! ${winnerName} won with ${highestScore} points!`
+      });
+
+      return {
+        move: selectedMove,
+        isKill: hasKilled,
+        isGoal: hasReachedGoal,
+        gameEnded: true,
+        nextTurnColor: null
+      };
+    }
+  }
+
   // Check if player won the game (all 4 pawns reached step 57)
   const allInGoal = gameState.pawns[color].every(step => step === 57);
   if (allInGoal) {
     gameState.winner = color;
+    
+    const player = gameState.players.find(p => p.color === color);
+    const playerName = player ? player.name : color;
+
     gameState.history.push({
-      text: `${color} won the match!`
+      text: `${playerName} won the match!`
     });
     return {
       move: selectedMove,
@@ -241,8 +363,12 @@ function handlePawnMove(gameState, color, pawnId) {
   if (getExtraTurn) {
     gameState.diceValue = null;
     gameState.rollState = 'idle';
+
+    const player = gameState.players.find(p => p.color === color);
+    const playerName = player ? player.name : color;
+
     gameState.history.push({
-      text: `${color} gets an extra roll!`
+      text: `${playerName} gets an extra roll!`
     });
   } else {
     passTurn(gameState);

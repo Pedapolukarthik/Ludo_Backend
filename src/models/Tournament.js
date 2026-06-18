@@ -1,50 +1,107 @@
-const mongoose = require('mongoose');
+const { DataTypes, Model } = require('sequelize');
+const connectDB = require('../config/db');
+const sequelize = connectDB.sequelize;
 
-const TournamentSchema = new mongoose.Schema({
+function parseJsonArray(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {}
+  }
+  return [];
+}
+
+class Tournament extends Model {
+  get _id() {
+    return String(this.id);
+  }
+  toJSON() {
+    const values = Object.assign({}, this.get());
+    values._id = String(values.id);
+    values.id = String(values.id);
+    if (values.winnerId) values.winnerId = String(values.winnerId);
+    values.winner = values.winnerId;
+    values.participants = parseJsonArray(values.participants).map(p => String(p));
+    values.brackets = parseJsonArray(values.brackets).map(b => {
+      if (b) {
+        const newB = { ...b };
+        if (newB.matches) {
+          newB.matches = parseJsonArray(newB.matches).map(m => String(m));
+        }
+        return newB;
+      }
+      return b;
+    });
+    return values;
+  }
+}
+
+Tournament.init({
+  id: {
+    type: DataTypes.INTEGER,
+    primaryKey: true,
+    autoIncrement: true,
+  },
   title: {
-    type: String,
-    required: true,
+    type: DataTypes.STRING,
+    allowNull: false,
   },
   entryFee: {
-    type: Number,
-    default: 200,
+    type: DataTypes.INTEGER,
+    defaultValue: 200,
   },
   prizePool: {
-    type: Number,
-    required: true,
+    type: DataTypes.INTEGER,
+    allowNull: false,
   },
   startTime: {
-    type: Date,
-    required: true,
+    type: DataTypes.DATE,
+    allowNull: false,
   },
   status: {
-    type: String,
-    enum: ['upcoming', 'ongoing', 'completed'],
-    default: 'upcoming',
+    type: DataTypes.ENUM('upcoming', 'ongoing', 'completed'),
+    defaultValue: 'upcoming',
   },
-  participants: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-  }],
-  brackets: [{
-    round: {
-      type: Number,
-      required: true,
-    },
-    matches: [{
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Match',
-    }]
-  }],
-  winner: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    default: null,
+  participants: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+    get() {
+      return parseJsonArray(this.getDataValue('participants'));
+    }
+  },
+  brackets: {
+    type: DataTypes.JSON,
+    defaultValue: [],
+    get() {
+      return parseJsonArray(this.getDataValue('brackets'));
+    }
+  },
+  winnerId: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'Users',
+      key: 'id'
+    }
   },
   createdAt: {
-    type: Date,
-    default: Date.now,
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW,
+  }
+}, {
+  sequelize,
+  modelName: 'Tournament',
+});
+
+Object.defineProperty(Tournament.prototype, 'winner', {
+  get() {
+    return this.winnerId;
+  },
+  set(val) {
+    this.winnerId = val;
   }
 });
 
-module.exports = mongoose.model('Tournament', TournamentSchema);
+module.exports = Tournament;

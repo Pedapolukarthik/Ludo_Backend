@@ -8,7 +8,9 @@ const User = require('../models/User');
  */
 const getTournaments = async (req, res) => {
   try {
-    const tournaments = await Tournament.find({}).sort({ startTime: 1 });
+    const tournaments = await Tournament.findAll({
+      order: [['startTime', 'ASC']]
+    });
     res.status(200).json({ success: true, tournaments });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -24,7 +26,7 @@ const registerTournament = async (req, res) => {
   const tournamentId = req.params.id;
 
   try {
-    const tournament = await Tournament.findById(tournamentId);
+    const tournament = await Tournament.findByPk(tournamentId);
     if (!tournament) {
       return res.status(404).json({ success: false, message: 'Tournament not found' });
     }
@@ -33,11 +35,12 @@ const registerTournament = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Registration closed for this tournament' });
     }
 
-    if (tournament.participants.includes(req.user._id)) {
+    const participantsList = tournament.participants || [];
+    if (participantsList.some(p => p.toString() === req.user.id.toString())) {
       return res.status(400).json({ success: false, message: 'Already registered for this tournament' });
     }
 
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
     if (user.coins < tournament.entryFee) {
       return res.status(400).json({ success: false, message: 'Insufficient coins to register' });
     }
@@ -46,7 +49,8 @@ const registerTournament = async (req, res) => {
     user.coins -= tournament.entryFee;
     await user.save();
 
-    tournament.participants.push(user._id);
+    tournament.participants = [...participantsList, user.id];
+    tournament.changed('participants', true);
     await tournament.save();
 
     res.status(200).json({
@@ -73,14 +77,13 @@ const createTournament = async (req, res) => {
   }
 
   try {
-    const tournament = new Tournament({
+    const tournament = await Tournament.create({
       title,
       entryFee: entryFee || 0,
       prizePool,
       startTime: new Date(startTime),
     });
 
-    await tournament.save();
     res.status(201).json({ success: true, tournament });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

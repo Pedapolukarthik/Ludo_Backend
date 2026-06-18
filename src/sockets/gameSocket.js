@@ -2,7 +2,7 @@ const Room = require('../models/Room');
 const User = require('../models/User');
 const Match = require('../models/Match');
 const Chat = require('../models/Chat');
-const { initializeGame, handleDiceRoll, handlePawnMove } = require('../services/gameEngine');
+const { initializeGame, handleDiceRoll, handlePawnMove, getPossibleMoves } = require('../services/gameEngine');
 const { selectBotMove } = require('../services/botService');
 const { generateVoiceToken } = require('../services/livekitService');
 const livekitConfig = require('../config/livekit');
@@ -14,29 +14,115 @@ const activeGames = new Map();
 // Simple queue for matchmaking: stores user objects
 let matchmakingQueue = [];
 
-function registerGameSocket(io) {
-  io.use(async (socket, next) => {
-    // Authenticate socket connection
-    const token = socket.handshake.auth.token || socket.handshake.query.token;
-    if (!token) {
-      return next(new Error('Authentication error: No token provided'));
-    }
+async function createLudoRoomHelper(user, maxPlayers, entryFee) {
+  const generatedCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const code = generatedCode.trim().toUpperCase();
+  const calculatedHostId = user.id || parseInt(user._id);
+  if (!calculatedHostId) {
+    throw new Error('Room creation aborted: hostId cannot be null or undefined');
+  }
 
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_ludo_jwt_key_123');
-      const user = await User.findById(decoded.id).select('name email avatar coins rank level');
-      if (!user) {
-        return next(new Error('Authentication error: User not found'));
-      }
-      socket.user = user;
-      next();
-    } catch (err) {
-      return next(new Error('Authentication error: Invalid token'));
-    }
+  const hostPlayerObject = {
+    user: String(user._id || user.id),
+    userId: String(user._id || user.id),
+    name: user.name,
+    avatar: user.avatar,
+    color: 'Red',
+    ready: true
+  };
+
+  const room = await Room.create({
+    code: code,
+    hostId: calculatedHostId,
+    players: [hostPlayerObject],
+    type: 'private',
+    maxPlayers: parseInt(maxPlayers) || 4,
+    entryFee: parseInt(entryFee) || 100,
+    status: 'waiting'
   });
 
+  return room;
+}
+
+async function joinLudoRoomHelper(user, code) {
+  const room = await Room.findOne({ where: { code } });
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  const players = Array.isArray(room.players)
+    ? room.players
+    : JSON.parse(room.players || '[]');
+
+  if (room.status !== 'waiting') {
+    throw new Error('Room not found or game already started');
+  }
+
+  if (players.length >= room.maxPlayers) {
+    throw new Error('Room is full');
+  }
+
+  const currentUserIdStr = String(user._id || user.id);
+  const alreadyJoined = players.find(p => p.user && String(p.user) === currentUserIdStr);
+  if (alreadyJoined) {
+    return room;
+  }
+
+  const assignedColors = players.map(p => p.color);
+  const allColors = ['Red', 'Green', 'Yellow', 'Blue'];
+  const freeColor = allColors.find(c => !assignedColors.includes(c));
+
+  players.push({
+    user: currentUserIdStr,
+    userId: currentUserIdStr,
+    name: user.name,
+    avatar: user.avatar,
+    color: freeColor,
+    ready: false
+  });
+
+  room.players = players;
+  await room.save();
+
+  return room;
+}
+
+function registerGameSocket(io) {
   io.on('connection', (socket) => {
     console.log(`User connected to Socket.IO: ${socket.user.name} (${socket.id})`);
+
+    // Check if player has an active game in progress to reconnect them
+    for (const [roomCode, gameState] of activeGames.entries()) {
+      const player = gameState.players.find(p => p.userId === socket.user._id.toString());
+      if (player) {
+        console.log(`Reconnecting user ${socket.user.name} to active game room ${roomCode}`);
+        socket.join(roomCode);
+        player.active = true;
+
+        const moves = gameState.diceValue ? getPossibleMoves(gameState, gameState.activeColor, gameState.diceValue) : [];
+        
+        // Trigger auto-navigation on client if they are on Home Screen
+        socket.emit('match_found', {
+          roomCode,
+          players: gameState.players,
+          gameState
+        });
+        
+        // Send current game state and moves to the reconnecting player to sync their UI
+        socket.emit('turn_changed', {
+          activeColor: gameState.activeColor,
+          possibleMoves: moves,
+          gameState
+        });
+        
+        // Broadcast updated state to other players in the room
+        socket.to(roomCode).emit('turn_changed', {
+          activeColor: gameState.activeColor,
+          gameState
+        });
+        break;
+      }
+    }
 
     // --- Lobby & Chat Events ---
     
@@ -70,9 +156,17 @@ function registerGameSocket(io) {
         const colors = ['Red', 'Green', 'Yellow', 'Blue'];
 
         try {
+          const calculatedHostId = parseInt(matched[0].userId) || matched[0].userId;
+          console.log(`[LUDO MATCHMAKING] Creating room. roomCode: ${roomCode}, calculatedHostId: ${calculatedHostId}`);
+
+          if (!calculatedHostId) {
+            throw new Error('Room creation aborted: hostId cannot be null or undefined');
+          }
+
           const room = new Room({
             code: roomCode,
-            host: matched[0].userId,
+            hostId: calculatedHostId,
+            host: String(calculatedHostId),
             players: matched.map((p, idx) => ({
               user: p.userId,
               name: p.name,
@@ -90,7 +184,11 @@ function registerGameSocket(io) {
 
           // Deduct entry fee
           for (const p of matched) {
-            await User.findByIdAndUpdate(p.userId, { $inc: { coins: -100 } });
+            const u = await User.findByPk(p.userId);
+            if (u) {
+              u.coins -= 100;
+              await u.save();
+            }
           }
 
           // Initialize game state in memory
@@ -126,87 +224,122 @@ function registerGameSocket(io) {
     });
 
     // Create custom private room
-    socket.on('create_room', async ({ maxPlayers, entryFee }) => {
-      const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    socket.on('create_room', async (payload) => {
+      console.log(`[LUDO_CREATE] payload = ${JSON.stringify(payload)}`);
+      const { maxPlayers, entryFee } = payload || {};
       try {
-        const room = new Room({
-          code: roomCode,
-          host: socket.user._id,
-          players: [{
-            user: socket.user._id,
-            name: socket.user.name,
-            avatar: socket.user.avatar,
-            color: 'Red',
-            ready: true
-          }],
-          type: 'private',
-          maxPlayers: parseInt(maxPlayers) || 4,
-          entryFee: parseInt(entryFee) || 100,
-          status: 'waiting'
-        });
-
-        await room.save();
-        socket.join(roomCode);
-        socket.emit('room_created', room);
+        const room = await createLudoRoomHelper(socket.user, maxPlayers, entryFee);
+        console.log(`[LUDO_CREATE] created room id/code = ${room.id}/${room.code}`);
+        socket.join(room.code);
+        console.log(`[LUDO_SOCKET_JOIN] socketId/code = ${socket.id}/${room.code}`);
+        socket.emit('room_created', room.toJSON());
       } catch (err) {
         socket.emit('error', err.message);
       }
     });
 
     // Join custom private room
-    socket.on('join_room', async ({ code }) => {
+    socket.on('join_room', async (payload) => {
+      console.log(`[LUDO_JOIN] payload = ${JSON.stringify(payload)}`);
       try {
-        const room = await Room.findOne({ code: code.toUpperCase(), status: 'waiting' });
-        if (!room) {
-          return socket.emit('error', 'Room not found or game already started');
-        }
+        const code = String(payload?.roomCode || payload?.code || '').trim().toUpperCase();
+        console.log(`[LUDO_JOIN] normalized code = ${code}`);
 
-        if (room.players.length >= room.maxPlayers) {
-          return socket.emit('error', 'Room is full');
-        }
-
-        // Prevent joining twice
-        const alreadyJoined = room.players.find(p => p.user && p.user.toString() === socket.user._id.toString());
-        if (alreadyJoined) {
-          socket.join(room.code);
-          return socket.emit('room_joined', room);
-        }
-
-        // Assign next available color
-        const assignedColors = room.players.map(p => p.color);
-        const allColors = ['Red', 'Green', 'Yellow', 'Blue'];
-        const freeColor = allColors.find(c => !assignedColors.includes(c));
-
-        room.players.push({
-          user: socket.user._id,
-          name: socket.user.name,
-          avatar: socket.user.avatar,
-          color: freeColor,
-          ready: false
-        });
-
-        await room.save();
-        socket.join(room.code);
+        const room = await joinLudoRoomHelper(socket.user, code);
+        socket.join(code);
+        console.log(`[LUDO_SOCKET_JOIN] socketId/code = ${socket.id}/${code}`);
         
-        io.to(room.code).emit('player_joined', room);
-        socket.emit('room_joined', room);
+        const roomJson = room.toJSON();
+        console.log(`[LUDO_EMIT] room_updated to code = ${code}`);
+        io.to(code).emit('room_updated', roomJson);
+        io.to(code).emit('player_joined', roomJson);
+        socket.emit('room_joined', roomJson);
       } catch (err) {
         socket.emit('error', err.message);
+      }
+    });
+
+    // Sync room (Socket fallback connection helper)
+    socket.on('join_socket_room', async ({ roomCode }) => {
+      console.log(`[SOCKET_FLOW] join_socket_room received: code = ${roomCode}`);
+      if (!roomCode) return;
+      const code = roomCode.trim().toUpperCase();
+      socket.join(code);
+      const room = await Room.findOne({ where: { code } });
+      if (room) {
+        const roomJson = room.toJSON();
+        io.to(code).emit('room_updated', roomJson);
+        io.to(code).emit('player_joined', roomJson);
       }
     });
 
     // Ready trigger in custom lobby
     socket.on('toggle_ready', async ({ roomCode }) => {
       try {
-        const room = await Room.findOne({ code: roomCode });
+        if (!roomCode || typeof roomCode !== 'string' || !roomCode.trim()) {
+          console.warn('[LUDO socket] toggle_ready: Invalid/empty roomCode received');
+          return;
+        }
+        const cleanCode = roomCode.trim().toUpperCase();
+        console.log(`[LUDO socket] Querying room by code: ${cleanCode}`);
+        const room = await Room.findOne({ where: { code: cleanCode } });
         if (!room) return;
 
-        const playerIdx = room.players.findIndex(p => p.user && p.user.toString() === socket.user._id.toString());
+        // Ensure players is array
+        const players = Array.isArray(room.players) ? room.players : JSON.parse(room.players || '[]');
+        const playerIdx = players.findIndex(p => p.user && p.user.toString() === socket.user._id.toString());
         if (playerIdx !== -1) {
-          room.players[playerIdx].ready = !room.players[playerIdx].ready;
+          players[playerIdx].ready = !players[playerIdx].ready;
+          room.players = players;
           await room.save();
-          io.to(roomCode).emit('room_updated', room);
+          console.log(`[LUDO_EMIT] room_updated to code = ${cleanCode}`);
+          io.to(cleanCode).emit('room_updated', room.toJSON());
         }
+      } catch (err) {
+        socket.emit('error', err.message);
+      }
+    });
+
+    socket.on('add_bot', async ({ roomCode }) => {
+      if (!socket.user) return;
+      try {
+        if (!roomCode || typeof roomCode !== 'string' || !roomCode.trim()) {
+          console.warn('[LUDO socket] add_bot: Invalid/empty roomCode received');
+          return socket.emit('error', 'Room code cannot be empty');
+        }
+        const cleanCode = roomCode.trim().toUpperCase();
+        console.log(`[LUDO socket] Querying room by code: ${cleanCode}`);
+        const room = await Room.findOne({ where: { code: cleanCode } });
+        if (!room) return;
+
+        if (room.host.toString() !== socket.user._id.toString()) {
+          return socket.emit('error', 'Only host can add bots');
+        }
+
+        const players = Array.isArray(room.players) ? room.players : JSON.parse(room.players || '[]');
+        if (players.length >= room.maxPlayers) {
+          return socket.emit('error', 'Room is full');
+        }
+
+        const assignedColors = players.map(p => p.color);
+        const allColors = ['Red', 'Green', 'Yellow', 'Blue'];
+        const freeColor = allColors.find(c => !assignedColors.includes(c));
+
+        players.push({
+          user: null,
+          name: `Bot ${freeColor}`,
+          avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=Bot${freeColor}`,
+          color: freeColor,
+          ready: true,
+          isBot: true,
+          botDifficulty: 'medium'
+        });
+
+        room.players = players;
+        await room.save();
+        console.log(`[LUDO_EMIT] room_updated to code = ${cleanCode}`);
+        io.to(cleanCode).emit('room_updated', room.toJSON());
+        io.to(cleanCode).emit('player_joined', room.toJSON());
       } catch (err) {
         socket.emit('error', err.message);
       }
@@ -215,7 +348,13 @@ function registerGameSocket(io) {
     // Host manually launches custom game (and populates remaining slots with bots if not full)
     socket.on('start_game', async ({ roomCode }) => {
       try {
-        const room = await Room.findOne({ code: roomCode });
+        if (!roomCode || typeof roomCode !== 'string' || !roomCode.trim()) {
+          console.warn('[LUDO socket] start_game: Invalid/empty roomCode received');
+          return socket.emit('error', 'Room code cannot be empty');
+        }
+        const cleanCode = roomCode.trim().toUpperCase();
+        console.log(`[LUDO socket] Querying room by code: ${cleanCode}`);
+        const room = await Room.findOne({ where: { code: cleanCode } });
         if (!room) return;
 
         if (room.host.toString() !== socket.user._id.toString()) {
@@ -223,13 +362,14 @@ function registerGameSocket(io) {
         }
 
         // Fill remaining slots with AI Bots
-        const assignedColors = room.players.map(p => p.color);
+        const players = Array.isArray(room.players) ? room.players : JSON.parse(room.players || '[]');
+        const assignedColors = players.map(p => p.color);
         const allColors = ['Red', 'Green', 'Yellow', 'Blue'];
         
-        while (room.players.length < room.maxPlayers) {
+        while (players.length < room.maxPlayers) {
           const freeColor = allColors.find(c => !assignedColors.includes(c));
           const botDiff = 'medium';
-          room.players.push({
+          players.push({
             user: null,
             name: `Bot ${freeColor}`,
             avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=Bot${freeColor}`,
@@ -241,18 +381,19 @@ function registerGameSocket(io) {
           assignedColors.push(freeColor);
         }
 
+        room.players = players;
         room.status = 'playing';
         await room.save();
 
         // Initialize game in memory
         const gameState = initializeGame(room);
-        activeGames.set(roomCode, gameState);
+        activeGames.set(cleanCode, gameState);
 
-        io.to(roomCode).emit('game_started', gameState);
+        io.to(cleanCode).emit('game_started', gameState);
 
         // Check if starting color is a bot!
         if (isColorBot(gameState, gameState.activeColor)) {
-          triggerBotTurn(io, roomCode);
+          triggerBotTurn(io, cleanCode);
         }
       } catch (err) {
         socket.emit('error', err.message);
@@ -265,17 +406,17 @@ function registerGameSocket(io) {
     socket.on('roll_dice', async ({ roomCode }) => {
       const gameState = activeGames.get(roomCode);
       if (!gameState) return socket.emit('error', 'Game state not found');
-
       try {
         const activePlayer = gameState.players.find(p => p.color === gameState.activeColor);
         if (!activePlayer || activePlayer.userId !== socket.user._id.toString()) {
           return socket.emit('error', 'Not your turn');
         }
 
+        const rollingColor = gameState.activeColor;
         const { roll, forfeit, possibleMoves } = handleDiceRoll(gameState, gameState.activeColor);
         
         io.to(roomCode).emit('dice_rolled', {
-          color: gameState.activeColor,
+          color: rollingColor,
           value: roll,
           forfeit,
           possibleMoves,
@@ -305,17 +446,17 @@ function registerGameSocket(io) {
     socket.on('move_pawn', async ({ roomCode, pawnId }) => {
       const gameState = activeGames.get(roomCode);
       if (!gameState) return socket.emit('error', 'Game state not found');
-
       try {
         const activePlayer = gameState.players.find(p => p.color === gameState.activeColor);
         if (!activePlayer || activePlayer.userId !== socket.user._id.toString()) {
           return socket.emit('error', 'Not your turn');
         }
 
+        const movingColor = gameState.activeColor;
         const result = handlePawnMove(gameState, gameState.activeColor, parseInt(pawnId));
         
         io.to(roomCode).emit('pawn_moved', {
-          color: gameState.activeColor,
+          color: movingColor,
           pawnId,
           move: result.move,
           isKill: result.isKill,
@@ -492,7 +633,7 @@ function triggerBotTurn(io, roomCode) {
  */
 async function finalizeGameEnd(io, roomCode, gameState) {
   try {
-    const room = await Room.findOne({ code: roomCode });
+    const room = await Room.findOne({ where: { code: roomCode } });
     if (!room) return;
 
     room.status = 'completed';
@@ -504,7 +645,7 @@ async function finalizeGameEnd(io, roomCode, gameState) {
       await room.save();
 
       // Award coins and XP, update stats and missions
-      const winnerUser = await User.findById(winnerId);
+      const winnerUser = await User.findByPk(winnerId);
       if (winnerUser) {
         const winnings = room.entryFee * room.maxPlayers;
         winnerUser.coins += winnings;
@@ -521,8 +662,14 @@ async function finalizeGameEnd(io, roomCode, gameState) {
         await incrementMissionProgressHelper(winnerUser, 'win_matches', 1);
 
         // Mark badge milestones
-        if (winnerUser.totalWins === 1) winnerUser.achievements.push('First Victory');
-        if (winnerUser.totalWins === 10) winnerUser.achievements.push('Ludo Master');
+        const achievementsList = winnerUser.achievements || [];
+        if (winnerUser.totalWins === 1) {
+          winnerUser.achievements = [...achievementsList, 'First Victory'];
+          winnerUser.changed('achievements', true);
+        } else if (winnerUser.totalWins === 10) {
+          winnerUser.achievements = [...achievementsList, 'Ludo Master'];
+          winnerUser.changed('achievements', true);
+        }
 
         await winnerUser.save();
       }
@@ -549,8 +696,8 @@ async function finalizeGameEnd(io, roomCode, gameState) {
 
       // Update loser games counts, statistics, and daily missions
       for (const p of room.players) {
-        if (p.user && p.user.toString() !== winnerId) {
-          const loserUser = await User.findById(p.user);
+        if (p.user && p.user.toString() !== winnerId.toString()) {
+          const loserUser = await User.findByPk(p.user);
           if (loserUser) {
             loserUser.totalGames += 1;
             loserUser.losses = (loserUser.losses || 0) + 1;
@@ -580,5 +727,7 @@ async function finalizeGameEnd(io, roomCode, gameState) {
 
 module.exports = {
   registerGameSocket,
-  activeGames
+  activeGames,
+  createLudoRoomHelper,
+  joinLudoRoomHelper
 };

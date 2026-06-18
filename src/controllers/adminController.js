@@ -3,6 +3,7 @@ const Match = require('../models/Match');
 const Room = require('../models/Room');
 const Tournament = require('../models/Tournament');
 const { activeGames } = require('../sockets/gameSocket');
+const { sendMulticastNotification } = require('../config/firebase');
 
 /**
  * @desc    Get dashboard metrics & analytics
@@ -11,16 +12,12 @@ const { activeGames } = require('../sockets/gameSocket');
  */
 const getAnalytics = async (req, res) => {
   try {
-    const totalUsers = await User.countDocuments();
-    const totalMatches = await Match.countDocuments();
-    const totalActiveRooms = await Room.countDocuments({ status: 'playing' });
+    const totalUsers = await User.count();
+    const totalMatches = await Match.count();
+    const totalActiveRooms = await Room.count({ where: { status: 'playing' } });
     
     // Aggregation of total coin balances
-    const coinStats = await User.aggregate([
-      { $group: { _id: null, totalCoins: { $sum: '$coins' } } }
-    ]);
-
-    const activeCoins = coinStats.length > 0 ? coinStats[0].totalCoins : 0;
+    const activeCoins = await User.sum('coins') || 0;
 
     res.status(200).json({
       success: true,
@@ -46,11 +43,12 @@ const listUsers = async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
 
   try {
-    const total = await User.countDocuments();
-    const users = await User.find({})
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .select('-firebaseToken');
+    const total = await User.count();
+    const users = await User.findAll({
+      offset: (page - 1) * limit,
+      limit: limit,
+      attributes: { exclude: ['firebaseToken'] }
+    });
 
     res.status(200).json({
       success: true,
@@ -76,7 +74,7 @@ const toggleBanUser = async (req, res) => {
   const { ban } = req.body;
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findByPk(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -104,7 +102,7 @@ const adjustCoins = async (req, res) => {
   const { coins, xp } = req.body;
 
   try {
-    const user = await User.findById(userId);
+    const user = await User.findByPk(userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -118,7 +116,7 @@ const adjustCoins = async (req, res) => {
       success: true,
       message: 'User balance successfully modified.',
       user: {
-        _id: user._id,
+        _id: user.id,
         name: user.name,
         coins: user.coins,
         xp: user.xp
@@ -142,12 +140,26 @@ const broadcastNotification = async (req, res) => {
   }
 
   try {
-    // In production, we'd trigger FCM admin SDK multicasts
-    console.log(`[Push Notification Broadcast] Title: "${title}" | Body: "${body}"`);
+    const users = await User.findAll({
+      where: {
+        firebaseToken: {
+          [require('sequelize').Op.ne]: null
+        }
+      },
+      attributes: ['firebaseToken']
+    });
+
+    const tokens = users.map(u => u.firebaseToken).filter(Boolean);
+    
+    if (tokens.length > 0) {
+      await sendMulticastNotification(tokens, title, body, { type: 'broadcast' });
+    }
+
+    console.log(`[Push Notification Broadcast] Title: "${title}" | Body: "${body}" | Sent to ${tokens.length} tokens.`);
 
     res.status(200).json({
       success: true,
-      message: 'Broadcast notification triggered successfully.'
+      message: `Broadcast notification successfully sent to ${tokens.length} devices.`
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -161,20 +173,19 @@ const broadcastNotification = async (req, res) => {
  */
 const getActiveMatches = async (req, res) => {
   try {
-    const list = [];
-    if (activeGames) {
-      activeGames.forEach((gameState, roomCode) => {
-        list.push({
-          roomCode,
-          players: gameState.players,
-          colors: gameState.colors,
-          activeColor: gameState.activeColor,
-          diceValue: gameState.diceValue,
-          rollState: gameState.rollState,
-          winner: gameState.winner
-        });
-      });
-    }
+    const activeRooms = await Room.findAll({ where: { status: 'playing' } });
+    const list = activeRooms.map(room => {
+      const state = room.gameState || {};
+      return {
+        roomCode: room.code,
+        gameType: room.gameType || 'ludo',
+        players: room.players,
+        status: room.status,
+        entryFee: room.entryFee,
+        winnerId: room.winnerId,
+        gameState: state
+      };
+    });
     res.status(200).json({ success: true, activeMatches: list });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -191,11 +202,12 @@ const getMatchHistory = async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
 
   try {
-    const total = await Match.countDocuments();
-    const matches = await Match.find({})
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+    const total = await Match.count();
+    const matches = await Match.findAll({
+      order: [['createdAt', 'DESC']],
+      offset: (page - 1) * limit,
+      limit: limit
+    });
 
     res.status(200).json({
       success: true,
@@ -221,7 +233,7 @@ const updateTournament = async (req, res) => {
   const { title, entryFee, prizePool, startTime, status, winner } = req.body;
 
   try {
-    const tournament = await Tournament.findById(tournamentId);
+    const tournament = await Tournament.findByPk(tournamentId);
     if (!tournament) {
       return res.status(404).json({ success: false, message: 'Tournament not found' });
     }
@@ -240,6 +252,40 @@ const updateTournament = async (req, res) => {
   }
 };
 
+const SystemConfig = require('../models/SystemConfig');
+
+/**
+ * @desc    Get all system configurations (Admin Only)
+ * @route   GET /api/admin/config
+ * @access  Private/Admin
+ */
+const getSystemConfigs = async (req, res) => {
+  try {
+    const configs = await SystemConfig.findAll();
+    res.status(200).json({ success: true, data: configs });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Update a specific system configuration (Admin Only)
+ * @route   PUT /api/admin/config
+ * @access  Private/Admin
+ */
+const updateSystemConfig = async (req, res) => {
+  const { key, value } = req.body;
+  if (!key) {
+    return res.status(400).json({ success: false, message: 'Key is required' });
+  }
+  try {
+    const config = await SystemConfig.setVal(key, value);
+    res.status(200).json({ success: true, data: config });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 /**
  * @desc    Delete tournament (Admin Only)
  * @route   DELETE /api/admin/tournaments/:id
@@ -249,11 +295,63 @@ const deleteTournament = async (req, res) => {
   const tournamentId = req.params.id;
 
   try {
-    const tournament = await Tournament.findByIdAndDelete(tournamentId);
-    if (!tournament) {
+    const deleted = await Tournament.destroy({ where: { id: tournamentId } });
+    if (!deleted) {
       return res.status(404).json({ success: false, message: 'Tournament not found' });
     }
     res.status(200).json({ success: true, message: 'Tournament deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @desc    Export all users as CSV data
+ * @route   GET /api/admin/users/export
+ * @access  Private/Admin
+ */
+const exportUsers = async (req, res) => {
+  try {
+    const users = await User.findAll({
+      order: [['id', 'ASC']]
+    });
+
+    const headers = [
+      'ID', 'Name', 'Email', 'Coins', 'XP', 'Level', 'Rank',
+      'Total Wins', 'Total Games', 'Losses', 'Current Streak',
+      'Highest Streak', 'Login Streak', 'Referred By', 'Referral Code',
+      'Allow Spectating', 'Banned', 'Registered At'
+    ];
+
+    const rows = users.map(u => [
+      u.id,
+      `"${(u.name || '').replace(/"/g, '""')}"`,
+      `"${(u.email || '').replace(/"/g, '""')}"`,
+      u.coins,
+      u.xp,
+      u.level,
+      u.rank,
+      u.totalWins,
+      u.totalGames,
+      u.losses,
+      u.currentWinStreak,
+      u.highestWinStreak,
+      u.loginStreak,
+      `"${(u.referredBy || '').replace(/"/g, '""')}"`,
+      `"${(u.referralCode || '').replace(/"/g, '""')}"`,
+      u.allowSpectating,
+      u.banned,
+      u.createdAt ? u.createdAt.toISOString() : ''
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(r => r.join(','))
+    ].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="users_export.csv"');
+    res.status(200).send(csvContent);
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -268,5 +366,8 @@ module.exports = {
   getActiveMatches,
   getMatchHistory,
   updateTournament,
-  deleteTournament
+  deleteTournament,
+  getSystemConfigs,
+  updateSystemConfig,
+  exportUsers
 };

@@ -1,5 +1,10 @@
 const { RoomServiceClient, TokenVerifier } = require('livekit-server-sdk');
 
+if (process.env.NODE_ENV === 'development') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  console.log('[LiveKit] Dev Mode: Bypassing SSL certificate validation (NODE_TLS_REJECT_UNAUTHORIZED=0)');
+}
+
 const DEFAULT_WS_URL = 'wss://ludo-game-0ahtd6si.livekit.cloud';
 
 /** Strip whitespace, quotes, and BOM from env values (common Render copy-paste issues). */
@@ -80,10 +85,9 @@ async function validateLiveKitCredentials() {
     return true;
   } catch (err) {
     config.credentialsValid = false;
-    console.error(
-      `[LiveKit] Credential verification FAILED: ${err.message}. ` +
-        'Voice tokens will be rejected. Fix LIVEKIT_API_KEY and LIVEKIT_API_SECRET in Render/.env.'
-    );
+    console.error('[LiveKit] Full Error:', err);
+    console.error('[LiveKit] Message:', err.message);
+    console.error('[LiveKit] Stack:', err.stack);
     return false;
   }
 }

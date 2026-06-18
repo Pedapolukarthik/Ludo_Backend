@@ -7,18 +7,16 @@ const User = require('../models/User');
  */
 const claimDailyReward = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     const today = new Date().toDateString();
-    // Use achievements or special last login checking
-    // Since streak is updated during login, we can store a custom claimed flag or check if already claimed today
-    // For simplicity, let's check if the last claimed date is today
     const claimedTodayKey = 'DailyClaim_' + today;
     
-    if (user.achievements.includes(claimedTodayKey)) {
+    const achievementsList = user.achievements || [];
+    if (achievementsList.includes(claimedTodayKey)) {
       return res.status(400).json({ success: false, message: 'Daily reward already claimed today.' });
     }
 
@@ -30,7 +28,8 @@ const claimDailyReward = async (req, res) => {
 
     user.coins += totalRewardCoins;
     user.xp += gainedXp;
-    user.achievements.push(claimedTodayKey);
+    user.achievements = [...achievementsList, claimedTodayKey];
+    user.changed('achievements', true);
 
     // Level up calculation (every 1000 XP is a level)
     const newLevel = Math.floor(user.xp / 1000) + 1;
@@ -72,7 +71,7 @@ const claimDailyReward = async (req, res) => {
  */
 const claimSpinWheel = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -80,7 +79,8 @@ const claimSpinWheel = async (req, res) => {
     const today = new Date().toDateString();
     const spinKey = 'SpinClaim_' + today;
 
-    if (user.achievements.includes(spinKey)) {
+    const achievementsList = user.achievements || [];
+    if (achievementsList.includes(spinKey)) {
       return res.status(400).json({ success: false, message: 'You have already spun the wheel today.' });
     }
 
@@ -107,7 +107,8 @@ const claimSpinWheel = async (req, res) => {
       }
     }
 
-    user.achievements.push(spinKey);
+    user.achievements = [...achievementsList, spinKey];
+    user.changed('achievements', true);
     
     // Increment daily mission spin progress
     await incrementMissionProgressHelper(user, 'spin_wheel', 1);
@@ -178,6 +179,8 @@ const incrementMissionProgressHelper = async (user, missionType, incrementAmount
     }
   }
 
+  user.changed('dailyMissions', true);
+
   if (coinsReward > 0 || xpReward > 0) {
     user.coins += coinsReward;
     user.xp += xpReward;
@@ -196,7 +199,7 @@ const incrementMissionProgressHelper = async (user, missionType, incrementAmount
 
 const getDailyMissions = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -213,6 +216,7 @@ const getDailyMissions = async (req, res) => {
         spunWheelClaimed: false,
         lastResetDate: today
       };
+      user.changed('dailyMissions', true);
       await user.save();
     } else if (user.dailyMissions.lastResetDate !== today) {
       user.dailyMissions.winMatchesCount = 0;
@@ -222,6 +226,7 @@ const getDailyMissions = async (req, res) => {
       user.dailyMissions.playMatchesClaimed = false;
       user.dailyMissions.spunWheelClaimed = false;
       user.dailyMissions.lastResetDate = today;
+      user.changed('dailyMissions', true);
       await user.save();
     }
 
@@ -265,9 +270,78 @@ const getDailyMissions = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Claim Ad-Rewarded Spin Wheel Reward
+ * @route   POST /api/rewards/spin-ad
+ * @access  Private
+ */
+const claimAdSpinWheel = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const today = new Date().toDateString();
+    const freeSpinKey = 'SpinClaim_' + today;
+    const adSpinKey = 'SpinAdClaim_' + today;
+
+    const achievementsList = user.achievements || [];
+    
+    if (!achievementsList.includes(freeSpinKey)) {
+      return res.status(400).json({ success: false, message: 'Please claim your daily free spin first.' });
+    }
+
+    if (achievementsList.includes(adSpinKey)) {
+      return res.status(400).json({ success: false, message: 'You have already claimed your extra ad-spin today.' });
+    }
+
+    const outcomes = [
+      { type: 'coins', amount: 100, label: '100 Coins' },
+      { type: 'coins', amount: 200, label: '200 Coins' },
+      { type: 'coins', amount: 300, label: '300 Coins' },
+      { type: 'coins', amount: 500, label: '500 Coins' },
+      { type: 'xp', amount: 200, label: '200 XP' },
+      { type: 'coins', amount: 1000, label: 'JACKPOT! 1000 Coins' },
+    ];
+
+    const randomOutcome = outcomes[Math.floor(Math.random() * outcomes.length)];
+
+    if (randomOutcome.type === 'coins') {
+      user.coins += randomOutcome.amount;
+    } else if (randomOutcome.type === 'xp') {
+      user.xp += randomOutcome.amount;
+      const newLevel = Math.floor(user.xp / 1000) + 1;
+      if (newLevel > user.level) {
+        user.level = newLevel;
+      }
+    }
+
+    user.achievements = [...achievementsList, adSpinKey];
+    user.changed('achievements', true);
+    
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Rewarded Ad Spin! You won ${randomOutcome.label}!`,
+      outcome: randomOutcome,
+      user: {
+        coins: user.coins,
+        xp: user.xp,
+        level: user.level,
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   claimDailyReward,
   claimSpinWheel,
+  claimAdSpinWheel,
   getDailyMissions,
   incrementMissionProgressHelper,
 };

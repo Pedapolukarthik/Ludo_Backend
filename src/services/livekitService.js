@@ -8,6 +8,12 @@ function formatVoiceRoomName(roomCode) {
   if (!normalized) {
     throw new Error('Room code is required for voice chat');
   }
+  if (normalized.startsWith('SNAKE-LADDER-')) {
+    return normalized.toLowerCase();
+  }
+  if (normalized.includes('CHESS')) {
+    return `chess-${normalized.toLowerCase().replaceAll('_', '-')}`;
+  }
   return `voice_${normalized}`;
 }
 

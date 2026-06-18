@@ -1,5 +1,8 @@
+const { Op } = require('sequelize');
 const User = require('../models/User');
 const Match = require('../models/Match');
+const connectDB = require('../config/db');
+const sequelize = connectDB.sequelize;
 
 /**
  * @desc    Update user profile (name, avatar)
@@ -10,7 +13,7 @@ const updateProfile = async (req, res) => {
   const { name, avatar } = req.body;
 
   try {
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -18,13 +21,19 @@ const updateProfile = async (req, res) => {
 
     if (name) user.name = name;
     if (avatar) user.avatar = avatar;
+    if (req.body.hasOwnProperty('allowSpectating')) {
+      user.allowSpectating = !!req.body.allowSpectating;
+    }
+    if (req.body.hasOwnProperty('firebaseToken')) {
+      user.firebaseToken = req.body.firebaseToken;
+    }
 
     await user.save();
 
     res.status(200).json({
       success: true,
       user: {
-        _id: user._id,
+        _id: String(user.id),
         name: user.name,
         email: user.email,
         avatar: user.avatar,
@@ -32,6 +41,7 @@ const updateProfile = async (req, res) => {
         xp: user.xp,
         level: user.level,
         rank: user.rank,
+        allowSpectating: user.allowSpectating,
       }
     });
   } catch (error) {
@@ -52,13 +62,16 @@ const searchUsers = async (req, res) => {
   }
 
   try {
-    const users = await User.find({
-      $or: [
-        { name: { $regex: query, $options: 'i' } },
-        { email: { $regex: query, $options: 'i' } }
-      ],
-      _id: { $ne: req.user._id } // Exclude self
-    }).select('name avatar coins level rank');
+    const users = await User.findAll({
+      where: {
+        [Op.or]: [
+          { name: { [Op.like]: `%${query}%` } },
+          { email: { [Op.like]: `%${query}%` } }
+        ],
+        id: { [Op.ne]: req.user.id } // Exclude self
+      },
+      attributes: ['id', 'name', 'avatar', 'coins', 'level', 'rank']
+    });
 
     res.status(200).json({ success: true, users });
   } catch (error) {
@@ -75,28 +88,39 @@ const sendFriendRequest = async (req, res) => {
   const targetId = req.params.id;
 
   try {
-    if (targetId === req.user._id.toString()) {
+    if (targetId === req.user.id.toString()) {
       return res.status(400).json({ success: false, message: 'You cannot add yourself as a friend' });
     }
 
-    const targetUser = await User.findById(targetId);
+    const targetUser = await User.findByPk(targetId);
     if (!targetUser) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     // Check if already friends or request already exists
-    const user = await User.findById(req.user._id);
+    const user = await User.findByPk(req.user.id);
 
-    if (user.friends.includes(targetId)) {
+    const targetIdInt = parseInt(targetId);
+    const friendsList = user.friends || [];
+    const friendRequestsList = targetUser.friendRequests || [];
+
+    if (friendsList.some(fId => fId.toString() === targetId.toString())) {
       return res.status(400).json({ success: false, message: 'You are already friends' });
     }
 
-    if (targetUser.friendRequests.includes(req.user._id)) {
+    if (friendRequestsList.some(rId => rId.toString() === req.user.id.toString())) {
       return res.status(400).json({ success: false, message: 'Friend request already sent' });
     }
 
-    targetUser.friendRequests.push(req.user._id);
+    targetUser.friendRequests = [...friendRequestsList, req.user.id];
+    targetUser.changed('friendRequests', true);
     await targetUser.save();
+
+    // Trigger push notification
+    const { sendPushNotification } = require('../config/firebase');
+    if (targetUser.firebaseToken) {
+      sendPushNotification(targetUser.firebaseToken, 'New Friend Request 👥', `${user.name} sent you a friend request!`, { type: 'friend_request', senderId: String(user.id) });
+    }
 
     res.status(200).json({ success: true, message: 'Friend request sent successfully' });
   } catch (error) {
@@ -113,25 +137,32 @@ const acceptFriendRequest = async (req, res) => {
   const senderId = req.params.id;
 
   try {
-    const user = await User.findById(req.user._id);
-    const sender = await User.findById(senderId);
+    const user = await User.findByPk(req.user.id);
+    const sender = await User.findByPk(senderId);
 
     if (!sender) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
+    const senderIdInt = parseInt(senderId);
+
     // Remove from requests
-    user.friendRequests = user.friendRequests.filter(
-      (reqId) => reqId.toString() !== senderId
+    user.friendRequests = (user.friendRequests || []).filter(
+      (reqId) => reqId.toString() !== senderId.toString()
     );
+    user.changed('friendRequests', true);
 
     // Add to friends
-    if (!user.friends.includes(senderId)) {
-      user.friends.push(senderId);
+    const userFriends = user.friends || [];
+    if (!userFriends.some((fId) => fId.toString() === senderId.toString())) {
+      user.friends = [...userFriends, senderIdInt];
+      user.changed('friends', true);
     }
 
-    if (!sender.friends.includes(user._id)) {
-      sender.friends.push(user._id);
+    const senderFriends = sender.friends || [];
+    if (!senderFriends.some((fId) => fId.toString() === user.id.toString())) {
+      sender.friends = [...senderFriends, user.id];
+      sender.changed('friends', true);
     }
 
     await user.save();
@@ -152,15 +183,18 @@ const removeFriend = async (req, res) => {
   const friendId = req.params.id;
 
   try {
-    const user = await User.findById(req.user._id);
-    const friend = await User.findById(friendId);
+    const user = await User.findByPk(req.user.id);
+    const friend = await User.findByPk(friendId);
 
     if (!friend) {
       return res.status(404).json({ success: false, message: 'Friend not found' });
     }
 
-    user.friends = user.friends.filter((fId) => fId.toString() !== friendId);
-    friend.friends = friend.friends.filter((fId) => fId.toString() !== req.user._id.toString());
+    user.friends = (user.friends || []).filter((fId) => fId.toString() !== friendId.toString());
+    user.changed('friends', true);
+
+    friend.friends = (friend.friends || []).filter((fId) => fId.toString() !== req.user.id.toString());
+    friend.changed('friends', true);
 
     await user.save();
     await friend.save();
@@ -178,9 +212,10 @@ const removeFriend = async (req, res) => {
  */
 const getMatchHistory = async (req, res) => {
   try {
-    const matches = await Match.find({
-      'players.user': req.user._id
-    }).sort({ createdAt: -1 });
+    const matches = await Match.findAll({
+      where: sequelize.literal(`JSON_CONTAINS(players, '{"user": ${req.user.id}}')`),
+      order: [['createdAt', 'DESC']]
+    });
 
     res.status(200).json({
       success: true,
